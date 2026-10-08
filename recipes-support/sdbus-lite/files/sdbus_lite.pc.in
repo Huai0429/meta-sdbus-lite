@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: sdbus_lite
+Description: SDBus helper library for simplified D-Bus operations
+Version: 1.0.0
+Requires: libsystemd
+Libs: -L${libdir} -lsdbus_lite
+Cflags: -I${includedir}
