@@ -2,13 +2,16 @@
  * sdbus_lite.c - sdbus-lite helper library for simplified D-Bus operations
  *
  * Author: Aaron Yu <huaichun.yu0429@gmail.com>
- * Date:   2026-10-04
+ * Date:   2026-10-17
  *
  * This library provides simplified APIs for D-Bus initialization,
  * method calls, and property management...
  */
 #include "sdbus_lite.h"
 
+static int sdbl_parse_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
+static int sdbl_parse_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
+static int sdbl_create_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
 /**
  * sdbl_init - Initialize a sdbl structure.
  * @pszbus_name:  DBus bus name
@@ -97,6 +100,43 @@ void sdbl_copy_sdbl_msg_t(sdbl_msg_t *pdest, const sdbl_msg_t *psrc)
     snprintf(pdest->pszpath, sizeof(pdest->pszpath), "%s", psrc->pszpath);
     pdest->pszinterface = psrc->pszinterface ? strdup(psrc->pszinterface) : NULL;
     pdest->pszmember    = psrc->pszmember ? strdup(psrc->pszmember) : NULL;
+}
+
+/**
+ * sdbl_free_nested - Recursively free any nested sdbl_msg_t held by a
+ * sdbl_msg_t's key/value pairs (MSG_FMT_DICT) or fields (MSG_FMT_STRUCT).
+ * Does not free psdbl_msg itself, since it may be stack-allocated.
+ *
+ * @psdbl_msg: sdbl_msg_t to walk and free nested entries of
+ */
+void sdbl_free_nested(sdbl_msg_t *psdbl_msg)
+{
+    if (!psdbl_msg) {
+        return;
+    }
+    if (psdbl_msg->format == MSG_FMT_STRUCT) {
+        for (int i = 0; i < psdbl_msg->msg_type_size; i++) {
+            if (psdbl_msg->fields[i].type == 'z' && psdbl_msg->fields[i].nest_val) {
+                sdbl_free_nested((sdbl_msg_t *)psdbl_msg->fields[i].nest_val);
+                free(psdbl_msg->fields[i].nest_val);
+                psdbl_msg->fields[i].nest_val = NULL;
+            }
+        }
+    }
+    else {
+        for (int i = 0; i < psdbl_msg->msg_type_size / 2; i++) {
+            if (psdbl_msg->key[i].type == 'z' && psdbl_msg->key[i].nest_val) {
+                sdbl_free_nested((sdbl_msg_t *)psdbl_msg->key[i].nest_val);
+                free(psdbl_msg->key[i].nest_val);
+                psdbl_msg->key[i].nest_val = NULL;
+            }
+            if (psdbl_msg->value[i].type == 'z' && psdbl_msg->value[i].nest_val) {
+                sdbl_free_nested((sdbl_msg_t *)psdbl_msg->value[i].nest_val);
+                free(psdbl_msg->value[i].nest_val);
+                psdbl_msg->value[i].nest_val = NULL;
+            }
+        }
+    }
 }
 
 /**
@@ -230,6 +270,45 @@ static int sdbl_basic_handle(sd_bus_message *pmsg, char type,  sdbl_io_action_e 
 }
 
 /**
+ * sdbl_nested_handle - Handle nested type read/write for DBus messages.
+ * @pmsg:    DBus message
+ * @type:   basic type character ('n' for nested structure/dictionary)
+ * @action: DBUS_IO_READ or DBUS_IO_APPEND
+ * @pval:    basic_type value to read into or append from
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+static int sdbl_nested_handle(sd_bus_message *pmsg, char type,  sdbl_io_action_e action, basic_type *pval)
+{
+    if (!pmsg || !pval) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
+    sdbl_msg_t *nest_psdbl_msg = pval->nest_val;
+
+    int ret;
+    if (action == IO_APPEND) {
+        ret = sdbl_create_msg(pmsg, nest_psdbl_msg);
+        if (ret < 0) {
+            printf("[Q_Q] Failed to append nested structure/dictionary: %s\n", strerror(-ret));
+            return ret;
+        }
+    }
+    else if (action == IO_READ) { // non-tested
+        ret = sdbl_parse_msg(pmsg, nest_psdbl_msg);
+        if (ret < 0) {
+            printf("[Q_Q] Failed to read nested structure/dictionary: %s\n", strerror(-ret));
+            return ret;
+        }
+    }
+    else {
+        printf("[Q_Q] Invalid action for %s\n", __func__);
+        return -1;
+    }
+    return 0;
+}
+
+/**
  * sdbl_read_variant - Read a variant type from a DBus message.
  * @pmsg: DBus message
  * @pval: basic_type structure to store the result
@@ -252,10 +331,44 @@ static int sdbl_read_variant(sd_bus_message *pmsg, basic_type *pval)
         printf("[Q_Q] Failed to enter variant container: %s\n", strerror(-ret));
         return ret;
     }
-    pval->type = pinner_contents[0];
-    ret = sdbl_basic_handle(pmsg, pval->type, IO_READ, pval);
+    SDBL_DBG("Variant inner signature: %c %s\n", inner_type, pinner_contents);
+    /* peek_type on a variant always reports inner_type == 'v' -- the real
+     * contained type is the *first char* of pinner_contents ('a' for an
+     * array/dict, '(' for a struct, otherwise a single scalar type char). */
+    if (pinner_contents[0] == SD_BUS_TYPE_ARRAY || pinner_contents[0] == SD_BUS_TYPE_STRUCT_BEGIN) {
+        pval->type = 'z'; // nested structure/dictionary
+        pval->nest_val = calloc(1, sizeof(sdbl_msg_t));
+        if (!pval->nest_val) {
+            printf("[Q_Q] Failed to allocate nested container in %s\n", __func__);
+            sd_bus_message_exit_container(pmsg);
+            return -1;
+        }
+        pval->nest_val->format = (pinner_contents[0] == SD_BUS_TYPE_ARRAY) ? MSG_FMT_DICT : MSG_FMT_STRUCT;
+        ret = sdbl_nested_handle(pmsg, 'z', IO_READ, pval);
+        if (ret < 0) {
+            printf("[Q_Q] Failed to read nested structure/dictionary: %s\n", strerror(-ret));
+            /* free any grandchildren the partial parse may have allocated */
+            sdbl_free_nested(pval->nest_val);
+            free(pval->nest_val);
+            pval->nest_val = NULL;
+            sd_bus_message_exit_container(pmsg);
+            return ret;
+        }
+    }
+    else {
+        pval->type = pinner_contents[0];
+        ret = sdbl_basic_handle(pmsg, pval->type, IO_READ, pval);
+        if (ret < 0) {
+            /* pval->nest_val was never allocated on this path -- it just
+             * aliases whatever scalar field qdbus_basic_handle wrote, so it
+             * must NOT be freed here. */
+            printf("[Q_Q] Failed to read simple variant: %s\n", strerror(-ret));
+            sd_bus_message_exit_container(pmsg);
+            return ret;
+        }
+    }
     sd_bus_message_exit_container(pmsg);
-    return ret;
+    return 0;
 }
 
 /**
@@ -298,7 +411,7 @@ static int sdbl_extract_dict_types(sd_bus_message *pmsg, char *pmsg_type, size_t
     return 0;
 }
 
-int sdbl_parse_basic(sd_bus_message *pmsg, basic_type *pval, char msg_type)
+static int sdbl_parse_basic(sd_bus_message *pmsg, basic_type *pval, char msg_type)
 {
     int ret;
     if (msg_type == 'v') {
@@ -314,9 +427,6 @@ int sdbl_parse_basic(sd_bus_message *pmsg, basic_type *pval, char msg_type)
     }
     return 0;
 }
-
-static int sdbl_parse_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
-static int sdbl_parse_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
 
 /**
  * sdbl_parse_msg - Parse a DBus message into a sdbl_msg_t.
@@ -369,14 +479,14 @@ int sdbl_parse_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
         if (ret < 0) {
             printf("[Q_Q]Failed to read key at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
             sd_bus_message_exit_container(pmsg);
-            break;
+            return -1;
         }
         SDBL_DBG("Value: ");
         ret = sdbl_parse_basic(pmsg, &psdbl_msg->value[0], psdbl_msg->pszmsg_type[1]);
         if (ret < 0) {
             printf("[Q_Q]Failed to read value at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
             sd_bus_message_exit_container(pmsg);
-            break;
+            return -1;
         }
         sd_bus_message_exit_container(pmsg);
     }
@@ -384,26 +494,100 @@ int sdbl_parse_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
     return 0;
 }
 
+/**
+ * sdbl_nested_signature - Get the nested signature of a message structure.
+ *
+ * @psdbl_msg: Message structure to get the nested signature of
+ * @pszsig:    Buffer to store the nested signature
+ * @sig_size:  Size of the buffer
+ *
+ * Return: 0 on success, -1 on failure.
+ */
+static int sdbl_nested_signature(const sdbl_msg_t *psdbl_msg, char *pszsig, size_t sig_size)
+{
+    if (!psdbl_msg || !pszsig || sig_size < 3) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
+    if (psdbl_msg->format == MSG_FMT_DICT) {
+        /* every dict entry in the array shares one "{key value}" element
+         * type, so only the first pair's two chars belong in the signature */
+        if (sig_size < 5) {
+            return -1;
+        }
+        snprintf(pszsig, sig_size, "a{%c%c}", psdbl_msg->pszmsg_type[0], psdbl_msg->pszmsg_type[1]);
+    }
+    else if (psdbl_msg->format == MSG_FMT_STRUCT) {
+        snprintf(pszsig, sig_size, "(%s)", psdbl_msg->pszmsg_type);
+    }
+    else {
+        printf("[Q_Q] Unsupported format for nested signature: %d\n", psdbl_msg->format);
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * sdbl_append_variant - Append a variant value to a DBus message.
+ *
+ * @pmsg:       DBus message to append to
+ * @underlying_type: the underlying type of the variant
+ * @pval:       basic_type value to append
+ *
+ * Return: 0 on success, -1 on failure.
+ */
+
 static int sdbl_append_variant(sd_bus_message *pmsg, char underlying_type, basic_type *pval)
 {
     if (!pmsg || !pval) {
         printf("[Q_Q] Invalid parameters for %s\n", __func__);
         return -1;
     }
-    char sig[2] = { underlying_type, '\0' };
+    if (underlying_type == '\0') {
+        printf("[Q_Q] Invalid underlying type for %s\n", __func__);
+        return -1;
+    }
     int ret;
+    char sig[64];
+
+    if (underlying_type == 'z') { // nested structure/dictionary
+        ret = sdbl_nested_signature(pval->nest_val, sig, sizeof(sig));
+        if (ret < 0) {
+            printf("[Q_Q] Failed to get nested signature at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+            return -1;
+        }
+        SDBL_DBG("Nested signature: %s\n", sig);
+    }
+    else {
+        strncpy(sig, &underlying_type, 1);
+        sig[1] = '\0';
+    }
 
     ret = sd_bus_message_open_container(pmsg, SD_BUS_TYPE_VARIANT, sig);
     if (ret < 0) {
         printf("[Q_Q] Failed to open variant container at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
         return -1;
     }
-    ret = sdbl_basic_handle(pmsg, underlying_type, IO_APPEND, pval);
-    if (ret < 0) {
-        printf("[Q_Q] Failed to append variant value at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
-        return -1;
+
+    SDBL_DBG("Appending nested variant value of type '%c'\n", underlying_type);
+    if (underlying_type == 'z') { // nested structure/dictionary
+        ret = sdbl_nested_handle(pmsg, underlying_type, IO_APPEND, pval);
+        if (ret < 0) {
+            printf("[Q_Q] Failed to append nested variant value at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+            sd_bus_message_close_container(pmsg);
+            return -1;
+        }
     }
-    ret = sd_bus_message_close_container(pmsg);
+    else {
+        ret = sdbl_basic_handle(pmsg, underlying_type, IO_APPEND, pval);
+        if (ret < 0) {
+            printf("[Q_Q] Failed to append variant value at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+            sd_bus_message_close_container(pmsg);
+            return -1;
+        }
+    }
+
+    ret = sd_bus_message_close_container(pmsg); // close the variant container
     if (ret < 0) {
         printf("[Q_Q] Failed to close variant container at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
         return -1;

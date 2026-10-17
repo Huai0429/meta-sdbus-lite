@@ -2,7 +2,7 @@
  * sdbus_lite.h - sdbus-lite helper library for simplified D-Bus operations
  *
  * Author: Aaron Yu <aaron.yu@quantatw.com>
- * Date:   2026-10-04
+ * Date:   2026-10-17
  *
  * This library provides simplified APIs for D-Bus initialization,
  * method calls, and property management...
@@ -22,7 +22,7 @@
 #include <systemd/sd-bus.h>
 
 #define MAX_STRING_LENGTH	256
-#define MAX_MSG_TYPE_LENGTH	16
+#define MAX_MSG_TYPE_LENGTH	32
 #define SDBL_DEBUG		1
 #define SDBL_DBG(fmt, ...)	\
 	do { if (SDBL_DEBUG) printf(fmt, ##__VA_ARGS__); } while (0)
@@ -38,9 +38,11 @@ typedef struct sdbl {
     bool server_mode; /* true if this sdbl instance is used for serving, false for client */
 } sdbl;
 
+typedef struct sdbl_msg sdbl_msg_t;
+
 typedef struct basic_type {
     char type; /* 'u' = uint32_t, 'i' = int32_t, 'd' = double,
-		    * 's' = string,  'y' = uint8_t
+		    * 's' = string,  'y' = uint8_t, 'z' = nested structure/dictionary
 		    */
     union {
         uint32_t u_val;
@@ -48,6 +50,7 @@ typedef struct basic_type {
         double   d_val;
         char    *s_val;
         uint8_t  y_val;
+        sdbl_msg_t *nest_val; /* for nested structures or dictionaries */
     };
 } basic_type;
 
@@ -57,7 +60,7 @@ typedef enum msg_fmt {
     MSG_FMT_PLAIN,  /* XX...  bare top-level args e.g. ss     */
 } msg_fmt_e;
 
-typedef struct sdbl_msg {
+struct sdbl_msg {
     char *pszmember;
     char *pszinterface;
     char  pszpath[MAX_STRING_LENGTH];
@@ -69,7 +72,7 @@ typedef struct sdbl_msg {
     basic_type value[MAX_MSG_TYPE_LENGTH / 2];
     /* MSG_FMT_STRUCT: flat field list for (XX...) messages */
     basic_type fields[MAX_MSG_TYPE_LENGTH];
-} sdbl_msg_t;
+};
 
 typedef enum sdbl_io_action {
     IO_READ,
@@ -87,6 +90,7 @@ typedef struct sdbl_inhibit_data {
 int sdbl_init(sdbl *pdbus, char *pszbus_name, char *pszpath, char *pszinterface, bool server_mode);
 int sdbl_deinit(sdbl *pdbus);
 void sdbl_copy_sdbl_msg_t(sdbl_msg_t *pdest, const sdbl_msg_t *psrc);
+void sdbl_free_nested(sdbl_msg_t *pcontainer);
 
 int sdbl_signal_add_match(sd_bus *pconn, const char *pszinterface, const char *pszmember, sdbl_callback phandler, void *puser_data);
 int sdbl_parse_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg);
