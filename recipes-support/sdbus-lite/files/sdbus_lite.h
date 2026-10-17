@@ -1,12 +1,3 @@
-/**
- * sdbus_lite.h - sdbus-lite helper library for simplified D-Bus operations
- *
- * Author: Aaron Yu <aaron.yu@quantatw.com>
- * Date:   2026-10-17
- *
- * This library provides simplified APIs for D-Bus initialization,
- * method calls, and property management...
- */
 #ifndef SDBL_H
 #define SDBL_H
 
