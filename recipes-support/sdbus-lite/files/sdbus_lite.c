@@ -1,3 +1,12 @@
+/**
+ * sdbus_lite.c - sdbus-lite helper library for simplified D-Bus operations
+ *
+ * Author: Aaron Yu <huaichun.yu0429@gmail.com>
+ * Date:   2026-10-17
+ *
+ * This library provides simplified APIs for D-Bus initialization,
+ * method calls, and property management...
+ */
 #include "sdbus_lite.h"
 
 /**
@@ -375,6 +384,33 @@ int sdbl_parse_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
     return 0;
 }
 
+static int sdbl_append_variant(sd_bus_message *pmsg, char underlying_type, basic_type *pval)
+{
+    if (!pmsg || !pval) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
+    char sig[2] = { underlying_type, '\0' };
+    int ret;
+
+    ret = sd_bus_message_open_container(pmsg, SD_BUS_TYPE_VARIANT, sig);
+    if (ret < 0) {
+        printf("[Q_Q] Failed to open variant container at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+        return -1;
+    }
+    ret = sdbl_basic_handle(pmsg, underlying_type, IO_APPEND, pval);
+    if (ret < 0) {
+        printf("[Q_Q] Failed to append variant value at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+        return -1;
+    }
+    ret = sd_bus_message_close_container(pmsg);
+    if (ret < 0) {
+        printf("[Q_Q] Failed to close variant container at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+        return -1;
+    }
+    return 0;
+}
+
 /**
  * sdbl_create_dict_msg - Append an array-of-dict body to a DBus message.
  *
@@ -387,6 +423,10 @@ int sdbl_parse_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_create_dict_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     char szdict_type[MAX_MSG_TYPE_LENGTH + 3]; /* '{' + type_sig + '}' + '\0' */
     int ret;
 
@@ -416,19 +456,33 @@ static int sdbl_create_dict_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
                    strerror(-ret));
             return -1;
         }
-
-        ret = sdbl_basic_handle(pmsg, psdbl_msg->pszmsg_type[i * 2], IO_APPEND, &psdbl_msg->key[i]);
-        if (ret < 0) {
-            printf("[Q_Q] Failed to append key at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
-            return -1;
+        if (entry_type[0] == 'v') {
+            ret = sdbl_append_variant(pmsg, psdbl_msg->key[i].type, &psdbl_msg->key[i]);
+            if (ret < 0) {
+                return -1;
+            }
+        }
+        else {
+            ret = sdbl_basic_handle(pmsg, psdbl_msg->pszmsg_type[i * 2], IO_APPEND, &psdbl_msg->key[i]);
+            if (ret < 0) {
+                printf("[Q_Q] Failed to append key at %s %d: %s\n", __func__, __LINE__, strerror(-ret));
+                return -1;
+            }
         }
 
-        ret = sdbl_basic_handle(pmsg, psdbl_msg->pszmsg_type[i * 2 + 1], IO_APPEND, &psdbl_msg->value[i]);
-        if (ret < 0) {
-            printf("[Q_Q] Failed to append value at %s %d: %s\n",  __func__, __LINE__, strerror(-ret));
-            return -1;
+        if (entry_type[1] == 'v') {
+            ret = sdbl_append_variant(pmsg, psdbl_msg->value[i].type, &psdbl_msg->value[i]);
+            if (ret < 0) {
+                return -1;
+            }
         }
-
+        else {
+            ret = sdbl_basic_handle(pmsg, psdbl_msg->pszmsg_type[i * 2 + 1], IO_APPEND, &psdbl_msg->value[i]);
+            if (ret < 0) {
+                printf("[Q_Q] Failed to append value at %s %d: %s\n",  __func__, __LINE__, strerror(-ret));
+                return -1;
+            }
+        }
         ret = sd_bus_message_close_container(pmsg);
         if (ret < 0) {
             printf("Failed to close dict entry container: %s\n", strerror(-ret));
@@ -456,6 +510,10 @@ static int sdbl_create_dict_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_parse_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     const char *pcontents;
     char type;
     int  nfields;
@@ -510,6 +568,10 @@ static int sdbl_parse_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_create_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     int ret;
     int i;
 
@@ -537,6 +599,10 @@ static int sdbl_create_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_parse_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     int ret;
     int i;
 
@@ -564,6 +630,10 @@ static int sdbl_parse_plain_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_create_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     int ret;
     int i;
 
@@ -600,6 +670,10 @@ static int sdbl_create_struct_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
  */
 static int sdbl_create_msg(sd_bus_message *pmsg, sdbl_msg_t *psdbl_msg)
 {
+    if (!pmsg || !psdbl_msg) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     if (psdbl_msg->format == MSG_FMT_STRUCT) {
         SDBL_DBG("Creating struct message with signature: %s\n", psdbl_msg->pszmsg_type);
         return sdbl_create_struct_msg(pmsg, psdbl_msg);
@@ -822,6 +896,10 @@ cleanup:
  */
 int sdbl_inhibit_unlock(sdbl_inhibit_data_t *pinhibit_data)
 {
+    if (!pinhibit_data) {
+        printf("[Q_Q] Invalid parameters for %s\n", __func__);
+        return -1;
+    }
     if (pinhibit_data && pinhibit_data->inhibit_fd >= 0) {
         close(pinhibit_data->inhibit_fd);
         pinhibit_data->inhibit_fd = -1;
